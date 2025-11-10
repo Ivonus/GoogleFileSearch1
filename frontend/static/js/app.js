@@ -40,9 +40,41 @@ async function handleUpload(e) {
     e.preventDefault();
     
     const form = e.target;
-    const formData = new FormData(form);
     const uploadBtn = document.getElementById('upload-btn');
     const statusDiv = document.getElementById('upload-status');
+    
+    // Crea FormData manuale filtrando metadati vuoti
+    const formData = new FormData();
+    
+    // Aggiungi file e displayName
+    const fileInput = form.querySelector('input[type="file"]');
+    const displayNameInput = form.querySelector('input[name="displayName"]');
+    const chunkSizeSelect = form.querySelector('select[name="chunkSize"]');
+    
+    formData.append('file', fileInput.files[0]);
+    if (displayNameInput.value) {
+        formData.append('displayName', displayNameInput.value);
+    }
+    
+    // Aggiungi configurazione chunking
+    if (chunkSizeSelect && chunkSizeSelect.value) {
+        formData.append('chunkSize', chunkSizeSelect.value);
+    }
+    
+    // Filtra e aggiungi solo metadati non vuoti
+    const metadataKeys = form.querySelectorAll('input[name="metadataKeys[]"]');
+    const metadataValues = form.querySelectorAll('input[name="metadataValues[]"]');
+    
+    metadataKeys.forEach((keyInput, index) => {
+        const key = keyInput.value.trim();
+        const value = metadataValues[index].value.trim();
+        
+        // Aggiungi solo se entrambi sono non vuoti
+        if (key && value) {
+            formData.append('metadataKeys[]', key);
+            formData.append('metadataValues[]', value);
+        }
+    });
     
     // Disabilita pulsante e mostra loader
     uploadBtn.disabled = true;
@@ -69,8 +101,8 @@ async function handleUpload(e) {
             // Reset form
             form.reset();
             
-            // Aggiorna lista documenti dopo 2 secondi
-            setTimeout(() => loadDocuments(), 2000);
+            // Non è necessario aggiornare la lista qui, ci pensa il poller
+            // setTimeout(() => loadDocuments(), 2000);
         } else {
             showStatus('error', `Errore: ${data.error}`);
             if (data.details) {
@@ -222,7 +254,11 @@ async function checkOperationStatus(operationName) {
 }
 
 // Carica lista documenti
-async function loadDocuments() {
+// Variabili per la paginazione
+let currentPageToken = '';
+let currentPageSize = 20;
+
+async function loadDocuments(pageToken = '', pageSize = currentPageSize) {
     const statusDiv = document.getElementById('documents-status');
     const table = document.getElementById('documents-table');
     const tbody = document.getElementById('documents-tbody');
@@ -232,7 +268,12 @@ async function loadDocuments() {
     table.style.display = 'none';
     
     try {
-        const response = await fetch(`${API_BASE}/documents`);
+        let url = `${API_BASE}/documents?pageSize=${pageSize}`;
+        if (pageToken) {
+            url += `&pageToken=${encodeURIComponent(pageToken)}`;
+        }
+        
+        const response = await fetch(url);
         const data = await response.json();
         
         if (data.success) {
@@ -243,6 +284,13 @@ async function loadDocuments() {
                     const row = createDocumentRow(doc);
                     tbody.appendChild(row);
                 });
+                
+                // Aggiorna token di paginazione
+                currentPageToken = data.nextPageToken || '';
+                currentPageSize = pageSize;
+                
+                // Mostra/nascondi controlli paginazione
+                updatePaginationControls();
                 
                 statusDiv.style.display = 'none';
                 table.style.display = 'table';
@@ -258,6 +306,25 @@ async function loadDocuments() {
         statusDiv.className = 'status-message error';
         statusDiv.textContent = `Errore di rete: ${error.message}`;
         console.error('Errore caricamento documenti:', error);
+    }
+}
+
+function updatePaginationControls() {
+    const paginationDiv = document.getElementById('pagination-controls');
+    const nextBtn = document.getElementById('next-page-btn');
+    
+    if (currentPageToken) {
+        paginationDiv.style.display = 'block';
+        nextBtn.style.display = 'inline-block';
+    } else {
+        paginationDiv.style.display = 'none';
+        nextBtn.style.display = 'none';
+    }
+}
+
+function loadNextPage() {
+    if (currentPageToken) {
+        loadDocuments(currentPageToken, currentPageSize);
     }
 }
 

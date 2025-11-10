@@ -5,6 +5,7 @@ const API_BASE = 'http://localhost:5000/api';
 let chatHistory = []; // Cronologia conversazione per multi-turn
 let activeDocumentsCount = 0;
 let isProcessing = false;
+let sessionId = generateSessionId(); // ID univoco per questa sessione
 
 // Inizializzazione
 document.addEventListener('DOMContentLoaded', () => {
@@ -14,20 +15,38 @@ document.addEventListener('DOMContentLoaded', () => {
     adjustTextareaHeight();
 });
 
+// Genera ID sessione univoco
+function generateSessionId() {
+    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
 // Inizializza chatbot
 function initializeChat() {
     console.log('🤖 Chatbot RAG inizializzato');
     
+    // Carica cronologia chat salvata
+    loadChatHistory();
+    
     // Carica impostazioni salvate
     const savedModel = localStorage.getItem('chat_model');
+    const modelSelect = document.getElementById('model-select');
+    
     if (savedModel) {
-        document.getElementById('model-select').value = savedModel;
-        updateModelDisplay();
+        // Verifica che il modello salvato esista ancora nelle opzioni
+        const modelExists = Array.from(modelSelect.options).some(opt => opt.value === savedModel);
+        if (modelExists) {
+            modelSelect.value = savedModel;
+        } else {
+            // Se il modello salvato non esiste più, usa il default
+            modelSelect.value = 'gemini-2.5-flash';
+            localStorage.setItem('chat_model', 'gemini-2.5-flash');
+        }
     } else {
-        // Default a gemini-2.5-flash-lite
-        document.getElementById('model-select').value = 'gemini-2.5-flash-lite';
-        updateModelDisplay();
+        // Default a gemini-2.5-flash
+        modelSelect.value = 'gemini-2.5-flash';
     }
+    
+    updateModelDisplay();
     
     const savedResults = localStorage.getItem('chat_results_count');
     if (savedResults) {
@@ -37,6 +56,80 @@ function initializeChat() {
     const savedSources = localStorage.getItem('chat_show_sources');
     if (savedSources !== null) {
         document.getElementById('show-sources').checked = savedSources === 'true';
+    }
+}
+
+// Carica cronologia chat da localStorage
+function loadChatHistory() {
+    try {
+        const saved = localStorage.getItem('chat_history');
+        if (saved) {
+            const data = JSON.parse(saved);
+            chatHistory = data.messages || [];
+            sessionId = data.sessionId || sessionId;
+            
+            // Ricrea i messaggi nell'interfaccia
+            chatHistory.forEach(msg => {
+                if (msg.role === 'user') {
+                    addMessage('user', msg.text);
+                } else if (msg.role === 'model') {
+                    addMessage('assistant', msg.text, msg.sources || []);
+                }
+            });
+            
+            console.log(`📜 Caricati ${chatHistory.length} messaggi dalla cronologia`);
+            
+            // Rimuovi welcome message se ci sono messaggi salvati
+            if (chatHistory.length > 0) {
+                const welcomeMsg = document.querySelector('.welcome-message');
+                if (welcomeMsg) {
+                    welcomeMsg.remove();
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Errore nel caricamento cronologia:', error);
+    }
+}
+
+// Salva cronologia chat in localStorage
+function saveChatHistory() {
+    try {
+        const data = {
+            sessionId: sessionId,
+            messages: chatHistory,
+            timestamp: new Date().toISOString()
+        };
+        localStorage.setItem('chat_history', JSON.stringify(data));
+    } catch (error) {
+        console.error('Errore nel salvataggio cronologia:', error);
+    }
+}
+
+// Cancella cronologia chat
+function clearChatHistory() {
+    if (confirm('Sei sicuro di voler cancellare tutta la cronologia della chat?')) {
+        // Pulisci array cronologia
+        chatHistory = [];
+        
+        // Rimuovi da localStorage
+        localStorage.removeItem('chat_history');
+        
+        // Pulisci UI
+        const container = document.getElementById('messages-container');
+        container.innerHTML = `
+            <div class="welcome-message">
+                <h2>👋 Ciao! Sono il tuo assistente RAG</h2>
+                <p>Puoi farmi domande sui documenti che hai caricato.</p>
+                <p class="info-text">💡 <strong>Suggerimento:</strong> Più documenti carichi, più completa sarà la mia conoscenza!</p>
+            </div>
+        `;
+        
+        // Genera nuovo session ID
+        sessionId = generateSessionId();
+        
+        showToast('Cronologia cancellata con successo', 'success');
+        console.log('🗑️ Cronologia chat cancellata');
     }
 }
 
@@ -207,13 +300,17 @@ async function handleSendMessage(e) {
         });
         chatHistory.push({
             role: 'model',
-            text: response
+            text: response,
+            sources: relevantChunks
         });
         
         // Mantieni solo le ultime 10 interazioni (20 messaggi)
         if (chatHistory.length > 20) {
             chatHistory = chatHistory.slice(-20);
         }
+        
+        // SALVA CRONOLOGIA IN LOCALSTORAGE
+        saveChatHistory();
         
     } catch (error) {
         console.error('Errore:', error);
@@ -294,6 +391,16 @@ function addMessage(type, content, sources = []) {
 // Cancella la conversazione
 function clearChat() {
     if (confirm('Vuoi davvero cancellare tutta la conversazione?')) {
+        // Pulisci array cronologia
+        chatHistory = [];
+        
+        // Rimuovi da localStorage
+        localStorage.removeItem('chat_history');
+        
+        // Genera nuovo session ID
+        sessionId = generateSessionId();
+        
+        // Pulisci UI
         const container = document.getElementById('messages-container');
         container.innerHTML = `
             <div class="welcome-message">
@@ -303,8 +410,9 @@ function clearChat() {
                 <p class="welcome-hint">Fai una domanda per iniziare...</p>
             </div>
         `;
-        chatHistory = [];
+        
         showToast('Conversazione cancellata', 'success');
+        console.log('🗑️ Conversazione cancellata - nuovo session ID:', sessionId);
     }
 }
 

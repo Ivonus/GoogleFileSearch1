@@ -47,6 +47,16 @@
                 </div>
 
                 <div class="form-group">
+                    <label for="chunk-size">Dimensione Chunk</label>
+                    <select id="chunk-size" name="chunkSize">
+                        <option value="256">Piccola (256 token) - Più preciso</option>
+                        <option value="400">Media (400 token) - Bilanciato</option>
+                        <option value="512" selected>Grande (512 token) - Massimo consentito</option>
+                    </select>
+                    <small>Controlla come il documento viene diviso. Limite massimo API Google: 512 token. Chunks più piccoli = ricerca più precisa ma meno contesto.</small>
+                </div>
+
+                <div class="form-group">
                     <label>Metadati Custom (opzionale)</label>
                     <div id="metadata-container">
                         <div class="metadata-row">
@@ -100,6 +110,13 @@
                     <tbody id="documents-tbody">
                     </tbody>
                 </table>
+                
+                <!-- Controlli Paginazione -->
+                <div id="pagination-controls" style="margin-top: 20px; text-align: center; display: none;">
+                    <button id="next-page-btn" class="btn btn-secondary" onclick="loadNextPage()" style="display: none;">
+                        Pagina Successiva →
+                    </button>
+                </div>
             </div>
         </section>
     </div>

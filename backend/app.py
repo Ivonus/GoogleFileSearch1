@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import requests
 import os
@@ -7,6 +7,10 @@ import logging
 from werkzeug.utils import secure_filename
 import mimetypes
 import time
+import tempfile
+import json
+from datetime import datetime, timedelta
+from typing import Dict, Optional
 
 # Carica variabili d'ambiente
 load_dotenv()
@@ -26,17 +30,149 @@ CORS(app)
 # Configurazione
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 FILE_SEARCH_STORE_NAME = os.getenv('FILE_SEARCH_STORE_NAME')
+DEFAULT_MODEL = os.getenv('DEFAULT_MODEL', 'gemini-2.5-pro')
+DEFAULT_CHUNK_SIZE = int(os.getenv('CHUNK_SIZE', '512'))
+CHUNK_OVERLAP_PERCENT = int(os.getenv('CHUNK_OVERLAP_PERCENT', '10'))
 BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 UPLOAD_BASE_URL = 'https://generativelanguage.googleapis.com/upload/v1beta'
 
 # Dimensione massima file: 100MB
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+# Upload folder temporaneo
+app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
+
+# MIME types permessi
+ALLOWED_MIME_TYPES = {
+    'application/pdf', 'text/plain', 'text/html', 'text/markdown',
+    'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'text/csv', 'application/json'
+}
+
+# Circuit Breaker per gestione rate limit
+class CircuitBreaker:
+    """Circuit breaker per gestire rate limit 429"""
+    def __init__(self, failure_threshold=5, timeout=60):
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout  # secondi
+        self.failure_count = 0
+        self.last_failure_time: Optional[datetime] = None
+        self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
+    
+    def call_allowed(self) -> bool:
+        """Verifica se la chiamata è permessa"""
+        if self.state == 'CLOSED':
+            return True
+        
+        if self.state == 'OPEN':
+            # Verifica se è passato il timeout
+            if self.last_failure_time and datetime.now() - self.last_failure_time > timedelta(seconds=self.timeout):
+                self.state = 'HALF_OPEN'
+                logger.info("Circuit breaker: OPEN -> HALF_OPEN (timeout scaduto)")
+                return True
+            return False
+        
+        # HALF_OPEN: permette una chiamata di test
+        return True
+    
+    def record_success(self):
+        """Registra una chiamata riuscita"""
+        self.failure_count = 0
+        if self.state == 'HALF_OPEN':
+            self.state = 'CLOSED'
+            logger.info("Circuit breaker: HALF_OPEN -> CLOSED (successo)")
+    
+    def record_failure(self):
+        """Registra una chiamata fallita"""
+        self.failure_count += 1
+        self.last_failure_time = datetime.now()
+        
+        if self.failure_count >= self.failure_threshold:
+            self.state = 'OPEN'
+            logger.warning(f"Circuit breaker: OPEN (troppi errori: {self.failure_count})")
+
+# Istanza globale del circuit breaker
+gemini_circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=60)
 
 def get_headers():
     """Restituisce gli headers per le richieste API"""
     return {
         'x-goog-api-key': GEMINI_API_KEY
     }
+
+def validate_query_text(query: str) -> tuple[bool, Optional[str]]:
+    """
+    Valida il testo della query
+    Returns: (is_valid, error_message)
+    """
+    if not query or not query.strip():
+        return False, "Query vuota"
+    
+    if len(query) > 2000:
+        return False, "Query troppo lunga (max 2000 caratteri)"
+    
+    # Controllo caratteri pericolosi per injection
+    dangerous_chars = ['<script', 'javascript:', 'onerror=', 'onclick=']
+    query_lower = query.lower()
+    for char in dangerous_chars:
+        if char in query_lower:
+            return False, f"Query contiene contenuto non permesso: {char}"
+    
+    return True, None
+
+def validate_mime_type(mime_type: str, filename: str) -> tuple[bool, Optional[str]]:
+    """
+    Valida il MIME type del file
+    Returns: (is_valid, error_message)
+    """
+    if not mime_type:
+        # Inferisci dal filename
+        mime_type, _ = mimetypes.guess_type(filename)
+    
+    if not mime_type:
+        return False, "Impossibile determinare il tipo di file"
+    
+    if mime_type not in ALLOWED_MIME_TYPES:
+        return False, f"Tipo di file non permesso: {mime_type}. Permessi: {', '.join(ALLOWED_MIME_TYPES)}"
+    
+    return True, None
+
+def validate_metadata(metadata_keys: list, metadata_values: list) -> tuple[bool, Optional[str]]:
+    """
+    Valida i metadati custom (ignora righe vuote)
+    Returns: (is_valid, error_message)
+    """
+    if len(metadata_keys) != len(metadata_values):
+        return False, "Numero di chiavi e valori metadati non corrispondono"
+    
+    # Filtra solo metadati non vuoti per la validazione
+    non_empty_pairs = [(k, v) for k, v in zip(metadata_keys, metadata_values) if k.strip() or v.strip()]
+    
+    if len(non_empty_pairs) > 50:
+        return False, "Troppi metadati (max 50)"
+    
+    for key, value in non_empty_pairs:
+        # Ignora coppie completamente vuote
+        if not key.strip() and not value.strip():
+            continue
+            
+        # Se la chiave è vuota ma il valore no, errore
+        if not key.strip() and value.strip():
+            return False, "Valore metadato senza chiave associata"
+        
+        # Valida lunghezza chiave
+        if len(key) > 100:
+            return False, f"Chiave metadato troppo lunga (max 100 caratteri): {key[:20]}..."
+        
+        # Controllo caratteri pericolosi nella chiave
+        if any(c in key for c in ['<', '>', '"', "'", ';', '\n', '\r']):
+            return False, f"Chiave metadato contiene caratteri non permessi: {key}"
+        
+        # Valida lunghezza valore
+        if len(value) > 500:
+            return False, f"Valore metadato troppo lungo (max 500 caratteri)"
+    
+    return True, None
 
 def validate_config():
     """Valida la configurazione dell'applicazione"""
@@ -109,6 +245,7 @@ def list_documents():
 @app.route('/api/documents/upload', methods=['POST'])
 def upload_document():
     """Carica un documento nel File Search Store (Long-Running Operation)"""
+    temp_file_path = None
     try:
         # Verifica presenza file
         if 'file' not in request.files:
@@ -121,18 +258,46 @@ def upload_document():
         # Recupera metadati opzionali
         display_name = request.form.get('displayName', file.filename)
         mime_type = request.form.get('mimeType', '')
+        chunk_size = int(request.form.get('chunkSize', DEFAULT_CHUNK_SIZE))  # Default dal .env
+        
+        # VALIDAZIONE CHUNK SIZE (limite API Google: 1-512)
+        if chunk_size < 1 or chunk_size > 512:
+            return jsonify({'success': False, 'error': f'Chunk size deve essere tra 1 e 512 (ricevuto: {chunk_size})'}), 400
         
         # Inferisci MIME type se non fornito
         if not mime_type:
             mime_type = mimetypes.guess_type(file.filename)[0] or 'application/octet-stream'
         
+        # VALIDAZIONE MIME TYPE
+        is_valid, error = validate_mime_type(mime_type, file.filename)
+        if not is_valid:
+            return jsonify({'success': False, 'error': error}), 400
+        
         # Metadati custom (opzionale)
         custom_metadata = {}
         metadata_keys = request.form.getlist('metadataKeys[]')
         metadata_values = request.form.getlist('metadataValues[]')
+        
+        logger.info(f"Metadati ricevuti - Keys: {metadata_keys}, Values: {metadata_values}")
+        
+        # VALIDAZIONE METADATI
+        if metadata_keys or metadata_values:
+            is_valid, error = validate_metadata(metadata_keys, metadata_values)
+            if not is_valid:
+                logger.error(f"Validazione metadati fallita: {error}")
+                return jsonify({'success': False, 'error': error}), 400
+        
+        # Filtra e aggiungi solo metadati non vuoti
         for key, value in zip(metadata_keys, metadata_values):
-            if key and value:
-                custom_metadata[key] = value
+            if key and key.strip() and value and value.strip():
+                custom_metadata[key.strip()] = value.strip()
+        
+        logger.info(f"Metadati custom validati: {custom_metadata}")
+        
+        # SALVA FILE TEMPORANEAMENTE SU DISCO (non in memoria)
+        temp_file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"upload_{int(time.time())}_{secure_filename(file.filename)}")
+        file.save(temp_file_path)
+        logger.info(f"File salvato temporaneamente: {temp_file_path}")
         
         # URL per upload
         url = f"{UPLOAD_BASE_URL}/{FILE_SEARCH_STORE_NAME}:uploadToFileSearchStore"
@@ -140,9 +305,8 @@ def upload_document():
         headers = get_headers()
         
         # Prepara i metadati del documento come JSON
-        import json
         metadata = {
-            'displayName': display_name[:512],  # Max 512 caratteri
+            'displayName': display_name.strip()[:100],  # Max 100 caratteri e senza spazi extra
             'mimeType': mime_type
         }
         
@@ -151,20 +315,33 @@ def upload_document():
                 {'key': k, 'stringValue': v} for k, v in custom_metadata.items()
             ]
         
-        # Prepara multipart upload con formato corretto per Google API
-        # Deve avere esattamente 2 parti: metadata e file
-        files = {
-            'metadata': (None, json.dumps(metadata), 'application/json'),
-            'file': (secure_filename(file.filename), file.stream, mime_type)
+        # CONFIGURAZIONE CHUNKING per divisione ottimale del documento
+        # La configurazione segue la struttura corretta dell'API Google
+        chunk_overlap = min(int(chunk_size * CHUNK_OVERLAP_PERCENT / 100), 100)  # Overlap dal .env, max 100
+        
+        metadata['chunkingConfig'] = {
+            'whiteSpaceConfig': {
+                'maxTokensPerChunk': chunk_size,      # Dimensione massima chunk in token
+                'maxOverlapTokens': chunk_overlap     # Token di sovrapposizione tra chunks
+            }
         }
         
-        logger.info(f"Caricamento file: {file.filename} ({mime_type})")
-        logger.info(f"Display name: {display_name}")
-        logger.info(f"Metadata: {json.dumps(metadata)}")
+        logger.info(f"Chunking config: max_tokens={chunk_size}, overlap={chunk_overlap}")
         
-        # Effettua l'upload - restituisce un'operazione
-        response = requests.post(url, headers=headers, files=files)
-        response.raise_for_status()
+        # Apri il file salvato e invialo (non usare stream che carica in memoria)
+        with open(temp_file_path, 'rb') as f:
+            files = {
+                'metadata': (None, json.dumps(metadata), 'application/json'),
+                'file': (secure_filename(file.filename), f, mime_type)
+            }
+            
+            logger.info(f"Caricamento file: {file.filename} ({mime_type})")
+            logger.info(f"Display name: {display_name}")
+            logger.info(f"Metadata: {json.dumps(metadata)}")
+            
+            # Effettua l'upload - restituisce un'operazione
+            response = requests.post(url, headers=headers, files=files)
+            response.raise_for_status()
         
         operation_data = response.json()
         operation_name = operation_data.get('name', '')
@@ -180,7 +357,14 @@ def upload_document():
         
     except requests.exceptions.RequestException as e:
         logger.error(f"Errore durante upload: {str(e)}")
-        error_detail = e.response.json() if hasattr(e, 'response') and e.response.content else str(e)
+        error_detail = str(e)
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+                logger.error(f"Dettagli errore API: {error_detail}")
+            except:
+                error_detail = e.response.text
+                logger.error(f"Risposta errore API (testo): {error_detail}")
         return jsonify({
             'success': False,
             'error': 'Errore durante il caricamento',
@@ -189,6 +373,14 @@ def upload_document():
     except Exception as e:
         logger.error(f"Errore imprevisto durante upload: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        # PULIZIA FILE TEMPORANEO (anche se ci sono stati errori)
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                logger.info(f"File temporaneo eliminato: {temp_file_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Errore nella pulizia del file temporaneo: {cleanup_error}")
 
 @app.route('/api/operations/<path:operation_name>', methods=['GET'])
 def get_operation_status(operation_name):
@@ -288,6 +480,11 @@ def query_documents():
                 'success': False,
                 'error': 'Query text è obbligatorio'
             }), 400
+        
+        # VALIDAZIONE INPUT
+        is_valid, error = validate_query_text(query_text)
+        if not is_valid:
+            return jsonify({'success': False, 'error': error}), 400
         
         logger.info(f"Query ricevuta: {query_text}")
         
@@ -393,13 +590,27 @@ def generate_response():
         query_text = data.get('query')
         relevant_chunks = data.get('relevant_chunks', [])
         chat_history = data.get('chat_history', [])  # Per conversazioni multi-turn
-        model = data.get('model', 'gemini-2.5-flash-lite')  # Default model
+        model = data.get('model', DEFAULT_MODEL)  # Default dal .env
         
         if not query_text:
             return jsonify({
                 'success': False,
                 'error': 'Query text è obbligatorio'
             }), 400
+        
+        # VALIDAZIONE INPUT
+        is_valid, error = validate_query_text(query_text)
+        if not is_valid:
+            return jsonify({'success': False, 'error': error}), 400
+        
+        # CONTROLLO CIRCUIT BREAKER
+        if not gemini_circuit_breaker.call_allowed():
+            logger.warning("Circuit breaker APERTO - troppe richieste fallite a Gemini API")
+            return jsonify({
+                'success': False,
+                'error': 'Servizio temporaneamente non disponibile. Riprova tra qualche minuto.',
+                'circuit_breaker_status': 'OPEN'
+            }), 503
         
         logger.info(f"Generazione risposta per: {query_text}")
         
@@ -455,15 +666,22 @@ def generate_response():
             try:
                 response = requests.post(generate_url, headers=get_headers(), json=payload, timeout=60)
                 response.raise_for_status()
+                
+                # REGISTRA SUCCESSO NEL CIRCUIT BREAKER
+                gemini_circuit_breaker.record_success()
                 break
             except requests.exceptions.HTTPError as he:
                 status = he.response.status_code if he.response is not None else None
                 # Se riceviamo 429 (Too Many Requests), ritentiamo con backoff
-                if status == 429 and attempt < max_retries - 1:
-                    logger.warning(f"429 from Gemini API, retry {attempt+1}/{max_retries} after {delay}s")
-                    time.sleep(delay)
-                    delay *= 2
-                    continue
+                if status == 429:
+                    # REGISTRA FALLIMENTO NEL CIRCUIT BREAKER
+                    gemini_circuit_breaker.record_failure()
+                    
+                    if attempt < max_retries - 1:
+                        logger.warning(f"429 from Gemini API, retry {attempt+1}/{max_retries} after {delay}s")
+                        time.sleep(delay)
+                        delay *= 2
+                        continue
                 # Non gestito qui: rilancia per essere catturato più in basso
                 raise
         
@@ -521,6 +739,113 @@ def generate_response():
     except Exception as e:
         logger.error(f"Errore imprevisto: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/chat/generate-stream', methods=['POST'])
+def generate_response_stream():
+    """
+    Endpoint per generare una risposta in streaming usando Gemini
+    Invia i chunk di testo man mano che vengono generati (SSE)
+    """
+    data = request.json
+    query_text = data.get('query')
+    relevant_chunks = data.get('relevant_chunks', [])
+    chat_history = data.get('chat_history', [])
+    model = data.get('model', DEFAULT_MODEL)  # Default dal .env
+    
+    # Validazione input
+    if not query_text:
+        return jsonify({'success': False, 'error': 'Query text è obbligatorio'}), 400
+    
+    is_valid, error = validate_query_text(query_text)
+    if not is_valid:
+        return jsonify({'success': False, 'error': error}), 400
+    
+    # Controllo circuit breaker
+    if not gemini_circuit_breaker.call_allowed():
+        return jsonify({
+            'success': False,
+            'error': 'Servizio temporaneamente non disponibile. Riprova tra qualche minuto.',
+            'circuit_breaker_status': 'OPEN'
+        }), 503
+    
+    def generate():
+        """Generatore per lo streaming SSE"""
+        try:
+            # Costruisci il contesto
+            context_parts = []
+            if relevant_chunks:
+                context_parts.append("Utilizza ESCLUSIVAMENTE i seguenti frammenti di contesto per rispondere alla domanda dell'utente:\n\n")
+                for i, chunk in enumerate(relevant_chunks, 1):
+                    chunk_text = chunk.get('chunk', {}).get('data', {}).get('stringValue', '')
+                    source = chunk.get('source_document', 'documento')
+                    context_parts.append(f"[Frammento {i} da {source}]:\n{chunk_text}\n\n")
+            
+            # Costruisci contents
+            contents = []
+            for message in chat_history:
+                contents.append({
+                    'role': message.get('role'),
+                    'parts': [{'text': message.get('text')}]
+                })
+            
+            user_prompt = ''.join(context_parts) if context_parts else ''
+            user_prompt += f"\n\nDomanda: {query_text}"
+            if context_parts:
+                user_prompt += "\n\nSe la risposta non può essere trovata nel contesto fornito, dillo chiaramente."
+            
+            contents.append({
+                'role': 'user',
+                'parts': [{'text': user_prompt}]
+            })
+            
+            # Chiamata streaming all'API Gemini
+            stream_url = f"{BASE_URL}/models/{model}:streamGenerateContent"
+            payload = {
+                'contents': contents,
+                'generationConfig': {
+                    'temperature': 0.7,
+                    'topK': 40,
+                    'topP': 0.95,
+                    'maxOutputTokens': 2048,
+                }
+            }
+            
+            # Stream con requests
+            with requests.post(stream_url, headers=get_headers(), json=payload, stream=True, timeout=60) as response:
+                response.raise_for_status()
+                gemini_circuit_breaker.record_success()
+                
+                # Gemini restituisce SSE con formato: data: {...}\n\n
+                for line in response.iter_lines():
+                    if line:
+                        line_str = line.decode('utf-8')
+                        # Rimuovi il prefisso "data: " se presente
+                        if line_str.startswith('data: '):
+                            line_str = line_str[6:]
+                        
+                        try:
+                            chunk_data = json.loads(line_str)
+                            candidates = chunk_data.get('candidates', [])
+                            if candidates:
+                                text_chunk = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                                if text_chunk:
+                                    # Invia il chunk come SSE
+                                    yield f"data: {json.dumps({'text': text_chunk})}\n\n"
+                        except json.JSONDecodeError:
+                            continue
+                
+                # Segnala fine dello streaming
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                
+        except requests.exceptions.HTTPError as he:
+            if he.response and he.response.status_code == 429:
+                gemini_circuit_breaker.record_failure()
+            yield f"data: {json.dumps({'error': 'Errore durante la generazione'})}\n\n"
+        except Exception as e:
+            logger.error(f"Errore streaming: {str(e)}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    
+    return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
 @app.route('/chat')
 def chat_page():

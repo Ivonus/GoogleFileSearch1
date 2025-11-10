@@ -33,7 +33,7 @@
             </div>
             <div class="info-item">
                 <span class="label">Modello:</span>
-                <span id="model-name" class="value">Gemini 2.5 Flash Lite</span>
+                <span id="model-name" class="value">Gemini 2.5 Flash</span>
             </div>
             <div class="info-item">
                 <span class="label">Stato:</span>
@@ -82,7 +82,7 @@
                 <div class="setting-group">
                     <label for="model-select">Modello Gemini:</label>
                     <select id="model-select">
-                        <option value="gemini-2.5-flash-lite" selected>Gemini 2.5 Flash Lite (Consigliato)</option>
+                        <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash (Consigliato)</option>
                         <option value="gemini-1.5-flash-latest">Gemini 1.5 Flash Latest</option>
                         <option value="gemini-1.5-pro-latest">Gemini 1.5 Pro Latest</option>
                         <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash (Experimental)</option>
@@ -97,6 +97,11 @@
                         <input type="checkbox" id="show-sources" checked>
                         Mostra fonti nei messaggi
                     </label>
+                </div>
+                <div class="setting-group">
+                    <button id="clear-history-btn" class="btn btn-danger" onclick="clearChatHistory()">
+                        🗑️ Cancella Cronologia
+                    </button>
                 </div>
             </div>
         </div>
