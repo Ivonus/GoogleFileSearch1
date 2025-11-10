@@ -852,6 +852,96 @@ def chat_page():
     """Pagina dell'interfaccia chatbot"""
     return render_template('chat.html')
 
+@app.route('/chunks')
+def chunks_page():
+    """Pagina per visualizzare i chunks dei documenti"""
+    return render_template('chunks.html')
+
+@app.route('/api/documents/<path:document_name>/chunks', methods=['POST'])
+def get_document_chunks(document_name):
+    """
+    Recupera tutti i chunks di un documento specifico tramite query.
+    L'API Google non ha un endpoint diretto per listare chunks,
+    quindi usiamo il metodo query con una stringa generica.
+    
+    Body params:
+    - query: stringa di ricerca (opzionale, default: "*" per tutti i chunks)
+    - resultsCount: numero di chunks da recuperare (max 100)
+    """
+    try:
+        data = request.get_json() or {}
+        query_string = data.get('query', '*')  # Query generica per ottenere tutti i chunks
+        results_count = min(int(data.get('resultsCount', 100)), 100)  # Max 100 per API
+        
+        # Costruisci URL per query sui chunks del documento
+        url = f"{BASE_URL}/{document_name}:query"
+        
+        headers = get_headers()
+        headers['Content-Type'] = 'application/json'
+        
+        # Payload per la query
+        payload = {
+            'query': query_string,
+            'resultsCount': results_count
+        }
+        
+        logger.info(f"Query chunks su documento: {document_name}")
+        logger.info(f"Query: '{query_string}', Max results: {results_count}")
+        
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        
+        response_data = response.json()
+        relevant_chunks = response_data.get('relevantChunks', [])
+        
+        logger.info(f"Recuperati {len(relevant_chunks)} chunks")
+        
+        # Formatta i chunks per la visualizzazione
+        formatted_chunks = []
+        for idx, chunk_wrapper in enumerate(relevant_chunks):
+            chunk = chunk_wrapper.get('chunk', {})
+            chunk_data = chunk.get('data', {})
+            
+            formatted_chunks.append({
+                'name': chunk.get('name', ''),
+                'index': idx + 1,
+                'stringValue': chunk_data.get('stringValue', ''),
+                'state': chunk.get('state', 'STATE_ACTIVE'),
+                'createTime': chunk.get('createTime', ''),
+                'updateTime': chunk.get('updateTime', ''),
+                'relevanceScore': chunk_wrapper.get('chunkRelevanceScore', 0)
+            })
+        
+        return jsonify({
+            'success': True,
+            'chunks': formatted_chunks,
+            'totalCount': len(formatted_chunks),
+            'note': 'I chunks sono ordinati per rilevanza. Per vedere tutti i chunks, usa query generiche come "*" o "document".'
+        })
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Errore durante recupero chunks: {e}")
+        error_detail = {}
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_detail = e.response.json()
+            except:
+                error_detail = {'error': str(e)}
+        logger.error(f"Dettagli errore API: {error_detail}")
+        return jsonify({
+            'success': False,
+            'error': f'Errore nel recupero dei chunks: {str(e)}',
+            'details': error_detail
+        }), 500
+    except Exception as e:
+        logger.error(f"Errore imprevisto: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.errorhandler(413)
 def request_entity_too_large(error):
     """Gestisce errori di file troppo grandi"""
