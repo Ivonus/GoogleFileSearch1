@@ -36,6 +36,13 @@ CHUNK_OVERLAP_PERCENT = int(os.getenv('CHUNK_OVERLAP_PERCENT', '10'))
 RESULTS_COUNT = int(os.getenv('RESULTS_COUNT', '25'))
 MIN_RELEVANCE_SCORE = float(os.getenv('MIN_RELEVANCE_SCORE', '0.3'))
 MAX_CHUNKS_FOR_GENERATION = int(os.getenv('MAX_CHUNKS_FOR_GENERATION', '15'))
+MAX_OUTPUT_TOKENS = int(os.getenv('MAX_OUTPUT_TOKENS', '4096'))
+MAX_CHAT_HISTORY = int(os.getenv('MAX_CHAT_HISTORY', '2'))
+
+# Configurazione provider di generazione
+GENERATION_PROVIDER = os.getenv('GENERATION_PROVIDER', 'gemini').lower()
+GENERATION_MODEL = os.getenv('GENERATION_MODEL', DEFAULT_MODEL)
+GENERATION_API_KEY = os.getenv('GENERATION_API_KEY', GEMINI_API_KEY)
 BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 UPLOAD_BASE_URL = 'https://generativelanguage.googleapis.com/upload/v1beta'
 
@@ -48,7 +55,7 @@ app.config['DOCUMENTS_STORAGE'] = os.path.join(os.path.dirname(os.path.dirname(_
 # Crea la cartella se non esiste
 os.makedirs(app.config['DOCUMENTS_STORAGE'], exist_ok=True)
 
-# MIME types permessi
+# MIME types permessi (solo documenti testuali - File Search Store non supporta immagini)
 ALLOWED_MIME_TYPES = {
     'application/pdf', 'text/plain', 'text/html', 'text/markdown',
     'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -199,6 +206,41 @@ def get_headers():
         'x-goog-api-key': GEMINI_API_KEY
     }
 
+def fix_encoding_issues(text: str) -> str:
+    """
+    Corregge problemi comuni di encoding UTF-8 mal interpretato come Latin-1
+    """
+    if not text:
+        return text
+    
+    # Mappa dei caratteri comuni mal codificati
+    replacements = {
+        'â¬': '€',     # Euro
+        'Ã ': 'à',     # a con accento grave
+        'Ã¨': 'è',     # e con accento grave
+        'Ã©': 'é',     # e con accento acuto
+        'Ã¬': 'ì',     # i con accento grave
+        'Ã²': 'ò',     # o con accento grave
+        'Ã¹': 'ù',     # u con accento grave
+        'Ã': 'À',      # A con accento grave
+        'Ã': 'È',      # E con accento grave
+        'Ã': 'É',      # E con accento acuto
+        'Ã': 'Ì',      # I con accento grave
+        'Ã': 'Ò',      # O con accento grave
+        'Ã': 'Ù',      # U con accento grave
+        'â': '"',      # Virgolette
+        'â': '"',      # Virgolette
+        'â': "'",      # Apostrofo
+        'â¦': '...',   # Ellipsis
+        'â': '–',      # En dash
+        'â': '—',      # Em dash
+    }
+    
+    for wrong, correct in replacements.items():
+        text = text.replace(wrong, correct)
+    
+    return text
+
 def validate_query_text(query: str) -> tuple[bool, Optional[str]]:
     """
     Valida il testo della query
@@ -280,6 +322,96 @@ def validate_config():
     if not FILE_SEARCH_STORE_NAME:
         raise ValueError("FILE_SEARCH_STORE_NAME non configurato")
     logger.info(f"Configurazione valida. Store: {FILE_SEARCH_STORE_NAME}")
+
+def call_generation_provider(messages: list, max_tokens: int = None, temperature: float = 0.7) -> str:
+    """
+    Chiama il provider di generazione configurato (Gemini, DeepSeek, OpenAI, etc.)
+    
+    Args:
+        messages: Lista di messaggi in formato [{'role': 'user'|'assistant', 'content': 'text'}]
+        max_tokens: Numero massimo di token nella risposta
+        temperature: Temperatura per la generazione
+    
+    Returns:
+        Il testo della risposta generata
+    """
+    max_tokens = max_tokens or MAX_OUTPUT_TOKENS
+    
+    if GENERATION_PROVIDER == 'deepseek':
+        # DeepSeek API (compatibile OpenAI)
+        import openai
+        client = openai.OpenAI(
+            api_key=GENERATION_API_KEY,
+            base_url="https://api.deepseek.com"
+        )
+        
+        # Converti formato messaggi
+        deepseek_messages = []
+        for msg in messages:
+            deepseek_messages.append({
+                'role': msg.get('role'),
+                'content': msg.get('content', '')
+            })
+        
+        response = client.chat.completions.create(
+            model=GENERATION_MODEL,
+            messages=deepseek_messages,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        
+        return response.choices[0].message.content
+    
+    elif GENERATION_PROVIDER == 'openai':
+        # OpenAI API
+        import openai
+        client = openai.OpenAI(api_key=GENERATION_API_KEY)
+        
+        openai_messages = []
+        for msg in messages:
+            openai_messages.append({
+                'role': msg.get('role'),
+                'content': msg.get('content', '')
+            })
+        
+        response = client.chat.completions.create(
+            model=GENERATION_MODEL,
+            messages=openai_messages,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        
+        return response.choices[0].message.content
+    
+    else:  # default: gemini
+        # Gemini API (logica esistente)
+        contents = []
+        for msg in messages:
+            contents.append({
+                'role': msg.get('role'),
+                'parts': [{'text': msg.get('content', '')}]
+            })
+        
+        generate_url = f"{BASE_URL}/models/{GENERATION_MODEL}:generateContent"
+        payload = {
+            'contents': contents,
+            'generationConfig': {
+                'temperature': temperature,
+                'topK': 40,
+                'topP': 0.95,
+                'maxOutputTokens': max_tokens,
+            }
+        }
+        
+        response = http_session.post(generate_url, headers=get_headers(), json=payload, timeout=60)
+        response.raise_for_status()
+        
+        result = response.json()
+        candidates = result.get('candidates', [])
+        if not candidates:
+            raise ValueError('Nessuna risposta generata dal modello')
+        
+        return candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '')
 
 @app.route('/')
 def index():
@@ -490,6 +622,14 @@ def upload_document():
 def get_operation_status(operation_name):
     """Recupera lo stato di un'operazione di upload"""
     try:
+        # Validazione
+        if not operation_name or operation_name == 'undefined':
+            logger.error("Operation name mancante o undefined")
+            return jsonify({
+                'success': False,
+                'error': 'Operation name mancante'
+            }), 400
+        
         # L'operation name è già completo (es: fileSearchStores/.../upload/operations/...)
         url = f"{BASE_URL}/{operation_name}"
         headers = get_headers()
@@ -626,6 +766,12 @@ def query_documents():
                     'error': 'Nessun documento attivo trovato'
                 }), 404
             
+            # Calcola chunks per documento: distribuisci RESULTS_COUNT tra i documenti
+            # Con 25 chunks e 5 documenti = 5 chunks per documento
+            # Con 25 chunks e 10 documenti = 3 chunks per documento (arrotonda up)
+            chunks_per_document = max(3, (results_count + len(active_documents) - 1) // len(active_documents))
+            logger.info(f"Query su {len(active_documents)} documenti attivi, {chunks_per_document} chunks per documento")
+            
             # Interroga tutti i documenti attivi e aggrega i risultati
             all_chunks = []
             for doc in active_documents:
@@ -634,7 +780,7 @@ def query_documents():
                 
                 query_payload = {
                     'query': query_text,
-                    'resultsCount': results_count
+                    'resultsCount': chunks_per_document
                 }
                 
                 try:
@@ -649,6 +795,7 @@ def query_documents():
                         chunk['source_document'] = doc.get('displayName', doc_name)
                     
                     all_chunks.extend(chunks)
+                    logger.info(f"  - {doc.get('displayName')}: {len(chunks)} chunks recuperati")
                 except Exception as e:
                     logger.warning(f"Errore query su documento {doc_name}: {str(e)}")
                     continue
@@ -658,6 +805,8 @@ def query_documents():
             
             # Limita al numero richiesto
             all_chunks = all_chunks[:results_count]
+            
+            logger.info(f"Totale chunks aggregati: {len(all_chunks)}, top score: {all_chunks[0].get('chunkRelevanceScore', 0):.2f} se disponibile")
             
             result_data = {
                 'success': True,
@@ -745,8 +894,13 @@ def generate_response():
             if chunk.get('chunkRelevanceScore', 0) >= MIN_RELEVANCE_SCORE
         ]
         
-        # Se abbiamo troppi chunk anche dopo il filtro, prendi i top N
-        chunks_to_use = high_score_chunks[:MAX_CHUNKS_FOR_GENERATION]
+        # Se non ci sono chunk con score alto, usa comunque i migliori disponibili
+        if not high_score_chunks and relevant_chunks:
+            logger.warning(f"Nessun chunk supera MIN_RELEVANCE_SCORE={MIN_RELEVANCE_SCORE}, uso i migliori {MAX_CHUNKS_FOR_GENERATION} disponibili")
+            chunks_to_use = relevant_chunks[:MAX_CHUNKS_FOR_GENERATION]
+        else:
+            # Se abbiamo troppi chunk anche dopo il filtro, prendi i top N
+            chunks_to_use = high_score_chunks[:MAX_CHUNKS_FOR_GENERATION]
         
         logger.info(f"Chunk recuperati: {len(relevant_chunks)}, Score >= {MIN_RELEVANCE_SCORE}: {len(high_score_chunks)}, Usati per generazione: {len(chunks_to_use)}")
         
@@ -759,42 +913,47 @@ def generate_response():
                 source = chunk.get('source_document', 'documento')
                 context_parts.append(f"[Frammento {i} da {source}]:\n{chunk_text}\n\n")
         
-        # Costruisci l'array contents per la conversazione
-        contents = []
+        # System instruction compatto
+        system_instruction = """Sei un assistente AI che risponde basandosi SOLO sui documenti forniti. 
+Rispondi in modo chiaro, conciso ed estrai solo le informazioni rilevanti."""
         
-        # Aggiungi system instruction come primo messaggio user
-        system_instruction = """Sei un assistente AI specializzato nel rispondere a domande basandoti ESCLUSIVAMENTE sui documenti forniti.
-
-ISTRUZIONI IMPORTANTI:
-1. Leggi attentamente la domanda dell'utente
-2. Analizza i frammenti di contesto forniti
-3. Rispondi SOLO alle informazioni specificamente richieste
-4. Sintetizza e organizza la risposta in modo chiaro e conciso
-5. Non copiare/incollare interi frammenti, ma estrai solo le info rilevanti
-6. Se la risposta richiede dati da più frammenti, uniscili in modo coerente
-7. Se l'informazione non è presente nel contesto, dillo chiaramente
-8. Usa un linguaggio professionale ma comprensibile
-9. Se appropriato, usa elenchi puntati per maggiore chiarezza"""
+        # STRATEGIA OTTIMIZZATA: Invia solo le DOMANDE dell'utente (non le risposte)
+        # Estrai solo le domande dell'utente dalla cronologia
+        user_questions = [msg.get('text', '') for msg in chat_history if msg.get('role') == 'user']
         
-        # Aggiungi la cronologia della chat se presente
-        for message in chat_history:
-            contents.append({
-                'role': message.get('role'),
-                'parts': [{'text': message.get('text')}]
-            })
+        # Limita al numero massimo configurato
+        max_history_messages = MAX_CHAT_HISTORY * 2
+        recent_questions = user_questions[-max_history_messages:] if len(user_questions) > max_history_messages else user_questions
         
-        # Costruisci il prompt finale per l'utente
-        if not chat_history:  # Solo al primo messaggio
-            user_prompt = system_instruction + "\n\n" + ''.join(context_parts)
-        else:
-            user_prompt = ''.join(context_parts) if context_parts else ''
+        # Rimuovi duplicati
+        unique_questions = []
+        seen = set()
+        for q in recent_questions:
+            if q and q not in seen:
+                unique_questions.append(q)
+                seen.add(q)
         
-        user_prompt += f"\n\nDOMANDA UTENTE: {query_text}\n\nRISPOSTA:"
+        # Costruisci un singolo prompt
+        user_prompt = system_instruction + "\n\n"
         
-        contents.append({
+        # Aggiungi il contesto dei documenti
+        user_prompt += ''.join(context_parts)
+        
+        # Aggiungi cronologia domande precedenti (se ci sono)
+        if unique_questions:
+            user_prompt += "\n\nCONTESTO CONVERSAZIONE - Domande precedenti dell'utente:\n"
+            for i, q in enumerate(unique_questions, 1):
+                user_prompt += f"{i}. {q}\n"
+            user_prompt += "\n"
+        
+        # Aggiungi la domanda corrente
+        user_prompt += f"DOMANDA CORRENTE: {query_text}\n\nRISPOSTA:"
+        
+        # Costruisci contents con un singolo messaggio user
+        contents = [{
             'role': 'user',
             'parts': [{'text': user_prompt}]
-        })
+        }]
         
         # Chiamata all'API Gemini
         generate_url = f"{BASE_URL}/models/{model}:generateContent"
@@ -805,7 +964,7 @@ ISTRUZIONI IMPORTANTI:
                 'temperature': 0.7,
                 'topK': 40,
                 'topP': 0.95,
-                'maxOutputTokens': 2048,
+                'maxOutputTokens': 8192,  # Aumentato per risposte più lunghe (era 2048)
             }
         }
         
@@ -850,6 +1009,9 @@ ISTRUZIONI IMPORTANTI:
             }), 500
         
         response_text = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+        
+        # Correggi problemi di encoding
+        response_text = fix_encoding_issues(response_text)
         
         return jsonify({
             'success': True,
@@ -929,92 +1091,187 @@ def generate_response_stream():
                 if chunk.get('chunkRelevanceScore', 0) >= MIN_RELEVANCE_SCORE
             ]
             
-            chunks_to_use = high_score_chunks[:MAX_CHUNKS_FOR_GENERATION]
+            # Se non ci sono chunk con score alto, usa comunque i migliori disponibili
+            if not high_score_chunks and relevant_chunks:
+                logger.warning(f"Streaming - Nessun chunk supera MIN_RELEVANCE_SCORE={MIN_RELEVANCE_SCORE}, uso i migliori {MAX_CHUNKS_FOR_GENERATION} disponibili")
+                chunks_to_use = relevant_chunks[:MAX_CHUNKS_FOR_GENERATION]
+            else:
+                chunks_to_use = high_score_chunks[:MAX_CHUNKS_FOR_GENERATION]
             
             logger.info(f"Streaming - Chunk recuperati: {len(relevant_chunks)}, Score >= {MIN_RELEVANCE_SCORE}: {len(high_score_chunks)}, Usati: {len(chunks_to_use)}")
+            
+            # Debug: mostra la struttura del primo chunk
+            if chunks_to_use:
+                logger.info(f"Esempio chunk per streaming: {json.dumps(chunks_to_use[0], indent=2)[:500]}")
             
             # Costruisci il contesto
             context_parts = []
             if chunks_to_use:
                 context_parts.append("CONTESTO DOCUMENTI:\n\n")
                 for i, chunk in enumerate(chunks_to_use, 1):
-                    chunk_text = chunk.get('chunk', {}).get('data', {}).get('stringValue', '')
+                    # Supporta entrambi i formati: nidificato e piatto
+                    chunk_text = chunk.get('chunk', {}).get('data', {}).get('stringValue', '') or chunk.get('stringValue', '')
                     source = chunk.get('source_document', 'documento')
-                    context_parts.append(f"[Frammento {i} da {source}]:\n{chunk_text}\n\n")
+                    if chunk_text:
+                        context_parts.append(f"[Frammento {i} da {source}]:\n{chunk_text}\n\n")
+                        logger.debug(f"Chunk {i}: {len(chunk_text)} caratteri")
             
-            # System instruction
-            system_instruction = """Sei un assistente AI specializzato nel rispondere a domande basandoti ESCLUSIVAMENTE sui documenti forniti.
-
-ISTRUZIONI IMPORTANTI:
-1. Leggi attentamente la domanda dell'utente
-2. Analizza i frammenti di contesto forniti
-3. Rispondi SOLO alle informazioni specificamente richieste
-4. Sintetizza e organizza la risposta in modo chiaro e conciso
-5. Non copiare/incollare interi frammenti, ma estrai solo le info rilevanti
-6. Se la risposta richiede dati da più frammenti, uniscili in modo coerente
-7. Se l'informazione non è presente nel contesto, dillo chiaramente
-8. Usa un linguaggio professionale ma comprensibile
-9. Se appropriato, usa elenchi puntati per maggiore chiarezza"""
+            logger.info(f"Contesto costruito: {len(context_parts)} parti, totale {sum(len(p) for p in context_parts)} caratteri")
             
-            # Costruisci contents
-            contents = []
-            for message in chat_history:
-                contents.append({
-                    'role': message.get('role'),
-                    'parts': [{'text': message.get('text')}]
-                })
+            # System instruction compatto
+            system_instruction = """Sei un assistente AI che risponde basandosi SOLO sui documenti forniti. 
+Rispondi in modo chiaro, conciso ed estrai solo le informazioni rilevanti."""
             
-            # Costruisci prompt
-            if not chat_history:  # Solo al primo messaggio
-                user_prompt = system_instruction + "\n\n" + ''.join(context_parts)
-            else:
-                user_prompt = ''.join(context_parts) if context_parts else ''
+            # STRATEGIA OTTIMIZZATA: Invia solo le DOMANDE dell'utente (non le risposte)
+            # Questo riduce drasticamente i token usati mantenendo il contesto della conversazione
             
-            user_prompt += f"\n\nDOMANDA UTENTE: {query_text}\n\nRISPOSTA:"
+            # Estrai solo le domande dell'utente dalla cronologia (ignora le risposte dell'assistant)
+            user_questions = [msg.get('text', '') for msg in chat_history if msg.get('role') == 'user']
             
-            contents.append({
+            # Limita al numero massimo configurato
+            max_history_messages = MAX_CHAT_HISTORY * 2  # Moltiplica per 2 perché contiamo solo user
+            recent_questions = user_questions[-max_history_messages:] if len(user_questions) > max_history_messages else user_questions
+            
+            # Rimuovi duplicati (a volte il frontend invia la stessa domanda 2 volte)
+            unique_questions = []
+            seen = set()
+            for q in recent_questions:
+                if q and q not in seen:
+                    unique_questions.append(q)
+                    seen.add(q)
+            
+            logger.info(f"Chat history: {len(user_questions)} domande utente totali, usando le ultime {len(unique_questions)} uniche")
+            
+            # Costruisci un singolo prompt con: system instruction + contesto + domande precedenti + domanda corrente
+            user_prompt = system_instruction + "\n\n"
+            
+            # Aggiungi il contesto dei documenti
+            user_prompt += ''.join(context_parts)
+            
+            # Aggiungi cronologia domande precedenti (se ci sono)
+            if unique_questions:
+                user_prompt += "\n\nCONTESTO CONVERSAZIONE - Domande precedenti dell'utente:\n"
+                for i, q in enumerate(unique_questions, 1):
+                    user_prompt += f"{i}. {q}\n"
+                user_prompt += "\n"
+            
+            # Aggiungi la domanda corrente
+            user_prompt += f"DOMANDA CORRENTE: {query_text}\n\nRISPOSTA:"
+            
+            logger.info(f"User prompt totale: {len(user_prompt)} caratteri (contesto: {sum(len(p) for p in context_parts)}, domande: {len(unique_questions)})")
+            
+            # Costruisci contents con un singolo messaggio user
+            contents = [{
                 'role': 'user',
                 'parts': [{'text': user_prompt}]
-            })
+            }]
             
             # Chiamata streaming all'API Gemini
-            stream_url = f"{BASE_URL}/models/{model}:streamGenerateContent"
+            # IMPORTANTE: Aggiungi alt=sse per ricevere Server-Sent Events
+            stream_url = f"{BASE_URL}/models/{model}:streamGenerateContent?alt=sse"
             payload = {
                 'contents': contents,
                 'generationConfig': {
                     'temperature': 0.7,
                     'topK': 40,
                     'topP': 0.95,
-                    'maxOutputTokens': 2048,
+                    'maxOutputTokens': 8192,  # Aumentato per risposte più lunghe (era 2048)
                 }
             }
             
-            # Stream con requests
-            with http_session.post(stream_url, headers=get_headers(), json=payload, stream=True, timeout=60) as response:
-                response.raise_for_status()
-                gemini_circuit_breaker.record_success()
-                
-                # Gemini restituisce SSE con formato: data: {...}\n\n
-                for line in response.iter_lines():
-                    if line:
-                        line_str = line.decode('utf-8')
-                        # Rimuovi il prefisso "data: " se presente
-                        if line_str.startswith('data: '):
-                            line_str = line_str[6:]
-                        
-                        try:
-                            chunk_data = json.loads(line_str)
-                            candidates = chunk_data.get('candidates', [])
-                            if candidates:
-                                text_chunk = candidates[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                                if text_chunk:
-                                    # Invia il chunk come SSE
-                                    yield f"data: {json.dumps({'text': text_chunk})}\n\n"
-                        except json.JSONDecodeError:
+            # Stream con requests - con retry su 503
+            logger.info(f"Chiamata API streaming a {stream_url}")
+            logger.info(f"Payload prompt length: {len(user_prompt)} caratteri")
+            
+            max_retries = 3
+            delay = 2
+            response = None
+            
+            for attempt in range(max_retries):
+                try:
+                    response = http_session.post(stream_url, headers=get_headers(), json=payload, stream=True, timeout=60)
+                    logger.info(f"Risposta API status: {response.status_code} (attempt {attempt+1})")
+                    
+                    # Se riceviamo 503 o 429, ritentiamo
+                    if response.status_code in [503, 429]:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"{response.status_code} from Gemini API, retry {attempt+1}/{max_retries} after {delay}s")
+                            response.close()
+                            time.sleep(delay)
+                            delay *= 2
                             continue
+                    
+                    response.raise_for_status()
+                    gemini_circuit_breaker.record_success()
+                    break
+                except requests.exceptions.RequestException as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Request error, retry {attempt+1}/{max_retries} after {delay}s: {str(e)}")
+                        time.sleep(delay)
+                        delay *= 2
+                        continue
+                    raise
+            
+            if response is None:
+                raise RuntimeError('Nessuna risposta dal servizio dopo tutti i retry')
+            
+            chunk_count = 0
+            raw_chunk_count = 0
+            
+            # DEBUG: Leggi il contenuto grezzo per vedere il formato
+            logger.info("Inizio lettura streaming...")
+            
+            # Gemini restituisce SSE format: "data: {...json...}\n"
+            for line in response.iter_lines(decode_unicode=True):
+                raw_chunk_count += 1
+                logger.debug(f"Raw line #{raw_chunk_count}: {line[:200] if line else 'EMPTY'}")
                 
-                # Segnala fine dello streaming
-                yield f"data: {json.dumps({'done': True})}\n\n"
+                if line and line.startswith('data: '):
+                    try:
+                        # Rimuovi il prefisso "data: " e parsa il JSON
+                        json_str = line[6:]  # Salta "data: "
+                        chunk_data = json.loads(json_str)
+                        logger.debug(f"Parsed JSON keys: {list(chunk_data.keys())}")
+                        
+                        # Estrai il testo dal chunk
+                        candidates = chunk_data.get('candidates', [])
+                        if candidates:
+                            candidate = candidates[0]
+                            logger.info(f"Candidates trovati: {len(candidates)}, keys: {list(candidate.keys())}")
+                            
+                            # Controlla se c'è un finishReason
+                            if 'finishReason' in candidate:
+                                finish_reason = candidate.get('finishReason')
+                                logger.warning(f"⚠️ Streaming terminato con finishReason: {finish_reason}")
+                                # Invia un messaggio di avviso al frontend se non è STOP normale
+                                if finish_reason != 'STOP':
+                                    yield f"data: {json.dumps({'warning': f'Risposta incompleta: {finish_reason}'})}\n\n"
+                            
+                            if 'content' in candidate:
+                                parts = candidate.get('content', {}).get('parts', [])
+                                logger.info(f"Parts trovati: {len(parts)}")
+                                if parts and 'text' in parts[0]:
+                                    text_chunk = parts[0]['text']
+                                    logger.info(f"Text chunk estratto: {repr(text_chunk[:100])}")
+                                    # Invia anche chunk vuoti/whitespace - il frontend li gestirà
+                                    if text_chunk:
+                                        # Correggi problemi di encoding
+                                        text_chunk = fix_encoding_issues(text_chunk)
+                                        chunk_count += 1
+                                        logger.info(f"✓ Inviato chunk {chunk_count}: {text_chunk[:50]}...")
+                                        # Invia il chunk come SSE
+                                        yield f"data: {json.dumps({'text': text_chunk})}\n\n"
+                                else:
+                                    logger.info(f"No text in parts: {parts}")
+                            else:
+                                logger.info(f"No content in candidate, keys: {list(candidate.keys())}")
+                    except (json.JSONDecodeError, IndexError, KeyError) as e:
+                        logger.warning(f"Errore parsing chunk streaming: {str(e)}, line: {line[:100]}")
+                        continue
+            
+            logger.info(f"Streaming completato: {raw_chunk_count} raw chunks ricevuti, {chunk_count} chunks testo inviati")
+            # Segnala fine dello streaming
+            yield f"data: {json.dumps({'done': True})}\n\n"
                 
         except requests.exceptions.HTTPError as he:
             if he.response and he.response.status_code == 429:
@@ -1075,26 +1332,45 @@ def get_document_chunks(document_name):
         
         logger.info(f"Recuperati {len(relevant_chunks)} chunks")
         
-        # Formatta i chunks per la visualizzazione
+        # Debug: log della struttura del primo chunk
+        if relevant_chunks:
+            logger.info(f"Esempio chunk: {json.dumps(relevant_chunks[0], indent=2)}")
+        
+        # Recupera informazioni del documento per includere i metadati
+        document_info = None
+        try:
+            doc_url = f"{BASE_URL}/{document_name}"
+            doc_response = http_session.get(doc_url, headers=headers)
+            doc_response.raise_for_status()
+            document_info = doc_response.json()
+            logger.info(f"Metadati documento recuperati: {document_info.get('displayName', 'N/A')}")
+        except Exception as doc_error:
+            logger.warning(f"Impossibile recuperare metadati documento: {doc_error}")
+        
+        # Formatta i chunks mantenendo la struttura originale per il frontend
         formatted_chunks = []
-        for idx, chunk_wrapper in enumerate(relevant_chunks):
-            chunk = chunk_wrapper.get('chunk', {})
-            chunk_data = chunk.get('data', {})
+        for chunk_wrapper in relevant_chunks:
+            chunk_data = {
+                'chunk': chunk_wrapper.get('chunk', {}),
+                'chunkRelevanceScore': chunk_wrapper.get('chunkRelevanceScore', 0),
+                'source_document': document_name
+            }
             
-            formatted_chunks.append({
-                'name': chunk.get('name', ''),
-                'index': idx + 1,
-                'stringValue': chunk_data.get('stringValue', ''),
-                'state': chunk.get('state', 'STATE_ACTIVE'),
-                'createTime': chunk.get('createTime', ''),
-                'updateTime': chunk.get('updateTime', ''),
-                'relevanceScore': chunk_wrapper.get('chunkRelevanceScore', 0)
-            })
+            # Aggiungi informazioni del documento se disponibili
+            if document_info:
+                chunk_data['document'] = {
+                    'name': document_info.get('name'),
+                    'displayName': document_info.get('displayName'),
+                    'customMetadata': document_info.get('customMetadata', [])
+                }
+            
+            formatted_chunks.append(chunk_data)
         
         return jsonify({
             'success': True,
             'chunks': formatted_chunks,
             'totalCount': len(formatted_chunks),
+            'document': document_info,
             'note': 'I chunks sono ordinati per rilevanza. Per vedere tutti i chunks, usa query generiche come "*" o "document".'
         })
         
