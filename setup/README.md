@@ -12,7 +12,11 @@ Questa cartella contiene tutti i file necessari per configurare e avviare il sis
 ### Avvio Server
 - **`start.bat`** - Avvia server development (Windows)
 - **`start.sh`** - Avvia server development (Linux/Mac)
+- **`start-production.bat`** - Avvia server production con Waitress (Windows)
 - **`start-production.sh`** - Avvia server production con Gunicorn (Linux)
+
+### Deployment Produzione
+- **`install-service.ps1`** - Installa come servizio Windows con NSSM
 
 ## Guide
 
@@ -42,11 +46,29 @@ chmod +x setup/start.sh
 ./setup/start.sh
 ```
 
+### Production (Windows)
+```powershell
+# Avvio manuale con Waitress
+.\setup\start-production.bat
+
+# Installazione come servizio Windows
+.\setup\install-service.ps1
+```
+
 ### Production (Linux)
 ```bash
+# Avvio manuale con Gunicorn
 chmod +x setup/start-production.sh
 ./setup/start-production.sh
+
+# Installazione come servizio systemd
+# Vedi docs/DEPLOYMENT.md
 ```
+
+## 📚 Documentazione Completa
+
+Per deployment in produzione, backup, monitoraggio e altro:
+- **[../docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md)** - Guida completa deployment Windows/Linux
 
 ## Prerequisiti
 

@@ -37,6 +37,58 @@ Doppio click su **`setup/start.bat`**
 
 ---
 
+## 🖥️ Deployment su Windows Server
+
+### Setup Produzione
+
+```powershell
+# 1. Clona repository
+git clone https://github.com/Attilio81/GoogleFileSearch.git
+cd GoogleFileSearch
+
+# 2. Esegui installazione automatica
+.\setup\setup.bat
+
+# 3. Configura .env con le tue credenziali
+```
+
+### Installazione come Servizio Windows
+
+Usa **NSSM** per eseguire l'app come servizio:
+
+```powershell
+# Installa NSSM
+choco install nssm
+
+# Crea servizio
+nssm install GoogleFileSearch "C:\GoogleFileSearch\venv\Scripts\python.exe" "C:\GoogleFileSearch\backend\app.py"
+nssm set GoogleFileSearch AppDirectory "C:\GoogleFileSearch\backend"
+
+# Avvia servizio
+nssm start GoogleFileSearch
+```
+
+### Configurazione Firewall
+
+```powershell
+New-NetFirewallRule -DisplayName "Google File Search" -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow
+```
+
+### Produzione con Waitress (WSGI Server)
+
+Per prestazioni migliori:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+pip install waitress
+cd backend
+waitress-serve --host=0.0.0.0 --port=5000 --threads=4 --channel-timeout=300 app:app
+```
+
+📖 **Guida completa deployment**: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
+---
+
 ## 🎯 Funzionalità
 
 ### 🗂️ Gestione Documenti
@@ -471,6 +523,15 @@ Apri DevTools (F12) per vedere:
 - [RAG Best Practices](https://www.anthropic.com/index/contextual-retrieval)
 
 ## 🚀 Changelog
+
+### v2.1.0 (2025-11-18)
+
+**🖥️ Deployment e Produzione**
+- ✨ Documentazione completa per deployment su Windows Server
+- ✨ Guida installazione come servizio Windows con NSSM
+- ✨ Setup produzione con Waitress WSGI server
+- ✨ Configurazione firewall e reverse proxy
+- 📖 Nuova documentazione DEPLOYMENT.md
 
 ### v2.0.0 (2025-11-11)
 

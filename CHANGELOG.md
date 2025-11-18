@@ -1,6 +1,35 @@
-# Changelog - Frontend React
+# Changelog - Google File Search RAG
 
-## [2.0.0] - 2025-11-12
+## [2.1.0] - 2025-11-18
+
+### 🚀 Deployment e Produzione
+
+#### ✨ Added
+- **Documentazione completa deployment** per Windows Server e Linux
+- **Guida installazione come servizio Windows** con NSSM
+- **Setup produzione con Waitress** WSGI server per Windows
+- **Setup produzione con Gunicorn** WSGI server per Linux
+- **Configurazione reverse proxy** IIS e Nginx
+- **SSL/HTTPS** con Certbot per Linux
+- **Script backup automatici** per Windows e Linux
+- **Health check scripts** per monitoraggio
+- **Systemd service** configuration per Linux
+- Nuovo file `docs/DEPLOYMENT.md` con guida completa
+
+#### 📝 Updated
+- `README.md` con sezione "Deployment su Windows Server"
+- Quick start con riferimenti al deployment
+- Changelog con nuova versione 2.1.0
+
+#### 🔒 Security
+- Best practices per produzione
+- Configurazione firewall Windows/Linux
+- Rate limiting e CORS
+- Protezione API Key
+
+---
+
+## [2.0.0] - 2025-11-12 (Frontend React)
 
 ### 🎉 Major Update: Modern State Management & Data Fetching
 
