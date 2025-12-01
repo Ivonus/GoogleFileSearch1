@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-RUN apk update && apk add --no-cache mc
+#RUN apk update && apk add --no-cache mc
 
 WORKDIR /app
 
