@@ -1,6 +1,8 @@
 # Build Stage
 FROM node:18-alpine as build
 
+RUN apt-get update && apt-get install -y mc && apt-get clean
+
 WORKDIR /app
 
 # Copia i file di configurazione delle dipendenze
