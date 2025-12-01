@@ -1,7 +1,7 @@
 # Build Stage
 FROM node:18-alpine as build
 
-RUN apt-get update && apt-get install -y mc && apt-get clean
+RUN apk update && apk add --no-cache mc
 
 WORKDIR /app
 
