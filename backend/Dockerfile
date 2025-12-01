@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-RUN apt-get update && apt-get install -y mc && apt-get clean
+RUN apk update && apk add --no-cache mc
 
 WORKDIR /app
 
