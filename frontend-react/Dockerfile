@@ -1,7 +1,7 @@
 # Build Stage
 FROM node:18-alpine as build
 
-RUN apk update && apk add --no-cache mc
+#RUN apk update && apk add --no-cache mc
 
 WORKDIR /app
 
