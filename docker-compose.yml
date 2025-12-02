@@ -12,8 +12,17 @@ services:
     volumes:
       - ./documents_storage:/app/documents_storage
     environment:
-      - FLASK_ENV=production
-      - DOCUMENTS_STORAGE=/app/documents_storage
+      FLASK_ENV: production
+      DOCUMENTS_STORAGE: /app/documents_storage
+      # Google / Gemini
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GENERATION_API_KEY: ${GENERATION_API_KEY}
+      FILE_SEARCH_STORE_NAME: ${FILE_SEARCH_STORE_NAME}
+
+      # Modell & Chunking
+      DEFAULT_MODEL: ${DEFAULT_MODEL}
+      CHUNK_SIZE: ${CHUNK_SIZE}
+      CHUNK_OVERLAP_PERCENT: ${CHUNK_OVERLAP_PERCENT}
     networks:
       - rag-network
 
