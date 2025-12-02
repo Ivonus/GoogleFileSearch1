@@ -1,6 +1,6 @@
-# rebuild 1
 FROM python:3.10-slim
 
+# rebuild 1
 #RUN apk update && apk add --no-cache mc
 
 WORKDIR /app
