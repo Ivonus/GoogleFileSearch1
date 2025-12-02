@@ -12,3 +12,10 @@ body {
 #root {
   min-height: 100vh;
 }
+
+.MuiBox-root code {
+    background-color: rgb(12 104 15);
+    padding: 4px;
+    border-radius: 8px;
+    font-family: monospace;
+}
