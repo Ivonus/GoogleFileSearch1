@@ -8,3 +8,5 @@ google-api-python-client
 requests
 pydantic
 python-multipart
+flask
+gunicorn
