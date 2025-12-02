@@ -716,59 +716,76 @@ def delete_document(document_name):
 def query_documents():
     try:
         data = request.get_json()
-        query_text = data.get('query', '').strip()
-
-        if not query_text:
-            return jsonify({"success": False, "error": "Query text missing"}), 400
-
-        if not FILE_SEARCH_STORE_NAME:
-            return jsonify({"success": False, "error": "FILE_SEARCH_STORE_NAME is not set"}), 500
+        query_text = data.get("query", "").strip()
+        results_count = int(data.get("resultsCount", RESULTS_COUNT))
 
         logger.info(f"Query erhalten: {query_text}")
+
+        if not query_text:
+            return jsonify({"success": False, "error": "Keine Query angegeben"}), 400
+
+        # ❗ Sicherstellen, dass ein FileSearchStore gesetzt ist
+        if not FILE_SEARCH_STORE_NAME:
+            return jsonify({
+                "success": False,
+                "error": "FILE_SEARCH_STORE_NAME ist nicht gesetzt."
+            }), 500
+
         logger.info(f"Verwende File Search Store: {FILE_SEARCH_STORE_NAME}")
 
-        # --- Gemini FileSearch Query ---
+        # Google GenAI Client (NEUE API)
         genai_client = genai.Client(api_key=GENERATION_API_KEY)
 
-        response = genai_client.models.generate_content(
-            model=GENERATION_MODEL,
-            contents=query_text,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(
-                    file_search=types.FileSearch(
-                        file_search_store_names=[FILE_SEARCH_STORE_NAME]
-                    )
-                )]
+        # 📌 FILE SEARCH – zentrale Search-Funktion
+        search_request = types.FileSearchRequest(
+            file_search=types.FileSearch(
+                file_search_store_names=[FILE_SEARCH_STORE_NAME]
             )
         )
 
-        # Text-Antwort extrahieren
-        answer_text = response.text if hasattr(response, "text") else ""
+        # 📌 Abfrage an das Modell + FileSearch-Tool
+        response = genai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=query_text,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(file_search=types.FileSearch(
+                    file_search_store_names=[FILE_SEARCH_STORE_NAME]
+                ))],
+                max_output_tokens=512,
+            )
+        )
 
-        # Grounding-Informationen extrahieren
-        chunks = []
-        if response.candidates:
-            candidate = response.candidates[0]
-            grounding = getattr(candidate, "grounding_metadata", None)
+        # 📌 Extract Grounding (Chunks → Relevanz)
+        relevant_chunks = []
 
-            if grounding and getattr(grounding, "grounding_chunks", None):
-                for chunk in grounding.grounding_chunks:
-                    chunks.append({
-                        "chunkText": getattr(chunk, "text", ""),
-                        "chunkRelevanceScore": getattr(chunk, "relevance_score", 0.0)
-                    })
+        candidate = response.candidates[0] if response.candidates else None
+        if candidate and candidate.grounding_metadata:
+            gm = candidate.grounding_metadata
+            chunks = gm.grounding_chunks or []
 
-        return jsonify({
+            for ch in chunks:
+                relevant_chunks.append({
+                    "chunkText": ch.content if hasattr(ch, "content") else ch.text,
+                    "chunkRelevanceScore": getattr(ch, "relevance_score", 0),
+                    "sourceDocument": getattr(ch, "document_name", "unknown")
+                })
+
+        result = {
             "success": True,
             "query": query_text,
-            "answer": answer_text,
-            "relevant_chunks": chunks,
-            "source_documents": FILE_SEARCH_STORE_NAME
-        })
+            "answer": response.text,
+            "relevant_chunks": relevant_chunks,
+            "documents_searched": 1
+        }
+
+        return jsonify(result)
 
     except Exception as e:
-        logger.error(f"Query-Fehler: {str(e)}", exc_info=True)
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error(f"Query-Fehler: {e}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": str(e),
+        }), 500
 
 @app.route('/api/chat/generate', methods=['POST'])
 def generate_response():
