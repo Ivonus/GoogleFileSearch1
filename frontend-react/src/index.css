@@ -14,8 +14,8 @@ body {
 }
 
 .MuiBox-root code {
-    background-color: rgb(12 104 15);
-    padding: 4px;
-    border-radius: 8px;
-    font-family: monospace;
+    background-color: rgb(12 104 15) !important;
+    padding: 4px !important;
+    border-radius: 8px !important;
+    font-family: monospace !important;
 }
