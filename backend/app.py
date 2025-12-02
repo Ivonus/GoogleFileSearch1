@@ -717,6 +717,7 @@ def query_documents():
     try:
         data = request.get_json()
         query_text = data.get("query", "").strip()
+        document_name = data.get("documentName")
         results_count = int(data.get("resultsCount", RESULTS_COUNT))
 
         logger.info(f"Query erhalten: {query_text}")
@@ -724,7 +725,7 @@ def query_documents():
         if not query_text:
             return jsonify({"success": False, "error": "Keine Query angegeben"}), 400
 
-        # ❗ Sicherstellen, dass ein FileSearchStore gesetzt ist
+        # File Search Store muss gesetzt sein
         if not FILE_SEARCH_STORE_NAME:
             return jsonify({
                 "success": False,
@@ -733,49 +734,37 @@ def query_documents():
 
         logger.info(f"Verwende File Search Store: {FILE_SEARCH_STORE_NAME}")
 
-        # Google GenAI Client (NEUE API)
+        # Gemini / GenAI Client
         genai_client = genai.Client(api_key=GENERATION_API_KEY)
 
-        # 📌 FILE SEARCH – zentrale Search-Funktion
-        search_request = types.FileSearchRequest(
-            file_search=types.FileSearch(
-                file_search_store_names=[FILE_SEARCH_STORE_NAME]
-            )
+        # 📌 Wenn ein Dokument angegeben wurde → Filter setzen
+        document_filters = None
+        if document_name:
+            document_filters = {"document": document_name}
+            logger.info(f"Filter auf spezifisches Dokument: {document_name}")
+
+        # 📌 GOOGLE FILE SEARCH – zentrale Query
+        search_response = genai_client.file_search.search(
+            file_search_store_name=FILE_SEARCH_STORE_NAME,
+            query=query_text,
+            max_chunks=results_count,
+            document_filter=document_filters
         )
 
-        # 📌 Abfrage an das Modell + FileSearch-Tool
-        response = genai_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=query_text,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(file_search=types.FileSearch(
-                    file_search_store_names=[FILE_SEARCH_STORE_NAME]
-                ))],
-                max_output_tokens=512,
-            )
-        )
-
-        # 📌 Extract Grounding (Chunks → Relevanz)
+        # 📌 Ergebnisse extrahieren
         relevant_chunks = []
-
-        candidate = response.candidates[0] if response.candidates else None
-        if candidate and candidate.grounding_metadata:
-            gm = candidate.grounding_metadata
-            chunks = gm.grounding_chunks or []
-
-            for ch in chunks:
-                relevant_chunks.append({
-                    "chunkText": ch.content if hasattr(ch, "content") else ch.text,
-                    "chunkRelevanceScore": getattr(ch, "relevance_score", 0),
-                    "sourceDocument": getattr(ch, "document_name", "unknown")
-                })
+        for r in search_response.results:
+            relevant_chunks.append({
+                "chunkText": r.chunk.text,
+                "chunkRelevanceScore": r.score,
+                "sourceDocument": r.chunk.document.display_name
+            })
 
         result = {
             "success": True,
             "query": query_text,
-            "answer": response.text,
             "relevant_chunks": relevant_chunks,
-            "documents_searched": 1
+            "documents_searched": 1 if document_name else "ALL"
         }
 
         return jsonify(result)
