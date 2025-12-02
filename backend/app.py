@@ -774,38 +774,35 @@ def query_documents():
             logger.info(f"Query su {len(active_documents)} documenti attivi, {chunks_per_document} chunks per documento")
             
             # Interroga tutti i documenti attivi e aggrega i risultati
-            all_chunks = []
-            for doc in active_documents:
-                doc_name = doc.get('name')
-                query_url = f"{BASE_URL}/{doc_name}:query"
-                
-                query_payload = {
-                    'query': query_text,
-                    'resultsCount': chunks_per_document
-                }
-                
-                try:
-                    query_response = http_session.post(query_url, headers=get_headers(), json=query_payload)
-                    query_response.raise_for_status()
-                    
-                    result = query_response.json()
-                    chunks = result.get('relevantChunks', [])
-                    
-                    # Aggiungi informazioni sul documento sorgente
-                    for chunk in chunks:
-                        chunk['source_document'] = doc.get('displayName', doc_name)
-                    
-                    all_chunks.extend(chunks)
-                    logger.info(f"  - {doc.get('displayName')}: {len(chunks)} chunks recuperati")
-                except Exception as e:
-                    logger.warning(f"Errore query su documento {doc_name}: {str(e)}")
-                    continue
-            
-            # Ordina per rilevanza (assumendo che abbiano un campo score)
-            all_chunks.sort(key=lambda x: x.get('chunkRelevanceScore', 0), reverse=True)
-            
-            # Limita al numero richiesto
-            all_chunks = all_chunks[:results_count]
+            # Neue Google File Search API: Query läuft auf STORE-Ebene
+            search_url = f"{BASE_URL}/{FILE_SEARCH_STORE_NAME}:search?key={GEMINI_API_KEY}"
+
+            search_payload = {
+                "query": query_text,
+                "n": results_count  # Anzahl gewünschter Treffer
+            }
+
+            try:
+                search_response = http_session.post(search_url, json=search_payload)
+                search_response.raise_for_status()
+                search_result = search_response.json()
+
+                results = search_result.get("results", [])
+
+                # Normalisierung ins alte API-Format deiner App
+                all_chunks = []
+                for r in results:
+                    all_chunks.append({
+                        "chunkText": r.get("chunkText", ""),
+                        "chunkRelevanceScore": r.get("score", 0),
+                        "source_document": r.get("document", "unknown")
+                    })
+
+                logger.info(f"Totale chunks aggregati: {len(all_chunks)}")
+
+            except Exception as e:
+                logger.error(f"Errore FileSearch-store-query: {e}")
+                all_chunks = []
             
             logger.info(f"Totale chunks aggregati: {len(all_chunks)}, top score: {all_chunks[0].get('chunkRelevanceScore', 0):.2f} se disponibile")
             
@@ -823,21 +820,30 @@ def query_documents():
         
         else:
             # Query su un documento specifico
-            query_url = f"{BASE_URL}/{document_name}:query"
-            
-            query_payload = {
-                'query': query_text,
-                'resultsCount': results_count
+            search_url = f"{BASE_URL}/{FILE_SEARCH_STORE_NAME}:search?key={GEMINI_API_KEY}"
+
+            search_payload = {
+                "query": query_text,
+                "n": results_count,
+                "documentFilter": {
+                    "document": document_name   # filtert nach genau diesem Dokument
+                }
             }
-            
-            query_response = http_session.post(query_url, headers=get_headers(), json=query_payload)
-            query_response.raise_for_status()
-            
-            result = query_response.json()
-            
+
+            search_response = http_session.post(search_url, json=search_payload)
+            search_response.raise_for_status()
+            search_result = search_response.json()
+
             return jsonify({
                 'success': True,
-                'relevant_chunks': result.get('relevantChunks', []),
+                'relevant_chunks': [
+                    {
+                        "chunkText": r.get("chunkText", ""),
+                        "chunkRelevanceScore": r.get("score", 0),
+                        "source_document": document_name
+                    }
+                    for r in search_result.get("results", [])
+                ],
                 'query': query_text
             })
         
