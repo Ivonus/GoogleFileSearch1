@@ -857,8 +857,8 @@ def generate_response():
                 context_parts.append(f"[Frammento {i} da {source}]:\n{chunk_text}\n\n")
         
         # System instruction compatto
-        system_instruction = """Sei un assistente AI che risponde basandosi SOLO sui documenti forniti. 
-        Rispondi in modo chiaro, conciso ed estrai solo le informazioni rilevanti."""
+        system_instruction = """Du bist ein KI-Assistent, der AUSSCHLIESSLICH auf Grundlage der bereitgestellten Dokumente antwortet.
+Antworte klar und präzise und extrahiere nur die relevanten Informationen."""
         
         # STRATEGIA OTTIMIZZATA: Invia solo le DOMANDE dell'utente (non le risposte)
         # Estrai solo le domande dell'utente dalla cronologia
@@ -1062,8 +1062,8 @@ def generate_response_stream():
             logger.info(f"Contesto costruito: {len(context_parts)} parti, totale {sum(len(p) for p in context_parts)} caratteri")
             
             # System instruction compatto
-            system_instruction = """Sei un assistente AI che risponde basandosi SOLO sui documenti forniti. 
-Rispondi in modo chiaro, conciso ed estrai solo le informazioni rilevanti."""
+            system_instruction = """Du bist ein KI-Assistent, der AUSSCHLIESSLICH auf Grundlage der bereitgestellten Dokumente antwortet.
+Antworte klar und präzise und extrahiere nur die relevanten Informationen."""
             
             # STRATEGIA OTTIMIZZATA: Invia solo le DOMANDE dell'utente (non le risposte)
             # Questo riduce drasticamente i token usati mantenendo il contesto della conversazione
