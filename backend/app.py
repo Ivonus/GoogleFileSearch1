@@ -12,6 +12,10 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 
+# ➤ Google Gemini / File Search importieren
+import google.generativeai as genai
+from google.generativeai import types
+
 # Carica variabili d'ambiente
 load_dotenv()
 
