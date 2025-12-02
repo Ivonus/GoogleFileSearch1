@@ -759,8 +759,7 @@ def query_documents():
             contents=query_text,
             config=types.GenerateContentConfig(
                 tools=[fs_tool],
-                max_output_tokens=512,
-                max_chunks=results_count
+                max_output_tokens=512
             )
         )
 
