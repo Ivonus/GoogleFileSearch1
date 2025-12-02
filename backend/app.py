@@ -13,8 +13,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 # ➤ Google Gemini / File Search importieren
-import google.generativeai as genai
-from google.generativeai import types
+from google import genai
+from google.genai import types
 
 # Carica variabili d'ambiente
 load_dotenv()
