@@ -11,3 +11,4 @@ python-multipart
 flask
 flask-cors
 gunicorn
+google-genai
