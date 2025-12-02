@@ -416,7 +416,8 @@ def call_generation_provider(messages: list, max_tokens: int = None, temperature
 @app.route('/')
 def index():
     """Pagina principale dell'interfaccia amministrativa"""
-    return render_template('index.html')
+    #return render_template('index.html')
+    return jsonify({"success": True, "message": "Backend running"})
 
 @app.route('/api/config', methods=['GET'])
 def get_config():
