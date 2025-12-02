@@ -710,154 +710,61 @@ def delete_document(document_name):
 
 @app.route('/api/chat/query', methods=['POST'])
 def query_documents():
-    """
-    Endpoint per eseguire una query sui documenti (Retrieval Phase)
-    Recupera i chunk rilevanti dai documenti attivi
-    """
     try:
-        # Rate limiting
-        client_ip = request.remote_addr
-        if not rate_limiter.is_allowed(client_ip):
-            return jsonify({
-                'success': False,
-                'error': 'Troppe richieste. Riprova tra un minuto.'
-            }), 429
-        
-        data = request.json
-        query_text = data.get('query')
-        document_name = data.get('document_name')  # Opzionale: nome specifico del documento
-        results_count = data.get('results_count', RESULTS_COUNT)  # Default da .env, max 100
-        
+        data = request.get_json()
+        query_text = data.get('query', '').strip()
+
         if not query_text:
-            return jsonify({
-                'success': False,
-                'error': 'Query text è obbligatorio'
-            }), 400
-        
-        # VALIDAZIONE INPUT
-        is_valid, error = validate_query_text(query_text)
-        if not is_valid:
-            return jsonify({'success': False, 'error': error}), 400
-        
-        logger.info(f"Query ricevuta: {query_text}")
-        
-        # Cache check
-        cache_key = f"{query_text}:{document_name}:{results_count}"
-        cached_result = query_cache.get(cache_key)
-        if cached_result:
-            logger.info("Risultato recuperato da cache")
-            return jsonify(cached_result)
-        
-        # Se non è specificato un documento, cerchiamo in tutti i documenti attivi
-        if not document_name:
-            # Prima otteniamo la lista dei documenti attivi
-            list_url = f"{BASE_URL}/{FILE_SEARCH_STORE_NAME}/documents"
-            list_response = http_session.get(list_url, headers=get_headers())
-            list_response.raise_for_status()
-            
-            documents_data = list_response.json()
-            documents = documents_data.get('documents', [])
-            
-            # Filtra solo documenti attivi
-            active_documents = [doc for doc in documents if doc.get('state') == 'STATE_ACTIVE']
-            
-            if not active_documents:
-                return jsonify({
-                    'success': False,
-                    'error': 'Nessun documento attivo trovato'
-                }), 404
-            
-            # Calcola chunks per documento: distribuisci RESULTS_COUNT tra i documenti
-            # Con 25 chunks e 5 documenti = 5 chunks per documento
-            # Con 25 chunks e 10 documenti = 3 chunks per documento (arrotonda up)
-            chunks_per_document = max(3, (results_count + len(active_documents) - 1) // len(active_documents))
-            logger.info(f"Query su {len(active_documents)} documenti attivi, {chunks_per_document} chunks per documento")
-            
-            # Interroga tutti i documenti attivi e aggrega i risultati
-            # Neue Google File Search API: Query läuft auf STORE-Ebene
-            search_url = f"{BASE_URL}/{FILE_SEARCH_STORE_NAME}:search?key={GEMINI_API_KEY}"
+            return jsonify({"success": False, "error": "Query text missing"}), 400
 
-            search_payload = {
-                "query": query_text,
-                "n": results_count  # Anzahl gewünschter Treffer
-            }
+        if not FILE_SEARCH_STORE_NAME:
+            return jsonify({"success": False, "error": "FILE_SEARCH_STORE_NAME is not set"}), 500
 
-            try:
-                search_response = http_session.post(search_url, json=search_payload)
-                search_response.raise_for_status()
-                search_result = search_response.json()
+        logger.info(f"Query erhalten: {query_text}")
+        logger.info(f"Verwende File Search Store: {FILE_SEARCH_STORE_NAME}")
 
-                results = search_result.get("results", [])
+        # --- Gemini FileSearch Query ---
+        genai_client = genai.Client(api_key=GENERATION_API_KEY)
 
-                # Normalisierung ins alte API-Format deiner App
-                all_chunks = []
-                for r in results:
-                    all_chunks.append({
-                        "chunkText": r.get("chunkText", ""),
-                        "chunkRelevanceScore": r.get("score", 0),
-                        "source_document": r.get("document", "unknown")
+        response = genai_client.models.generate_content(
+            model=GENERATION_MODEL,
+            contents=query_text,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(
+                    file_search=types.FileSearch(
+                        file_search_store_names=[FILE_SEARCH_STORE_NAME]
+                    )
+                )]
+            )
+        )
+
+        # Text-Antwort extrahieren
+        answer_text = response.text if hasattr(response, "text") else ""
+
+        # Grounding-Informationen extrahieren
+        chunks = []
+        if response.candidates:
+            candidate = response.candidates[0]
+            grounding = getattr(candidate, "grounding_metadata", None)
+
+            if grounding and getattr(grounding, "grounding_chunks", None):
+                for chunk in grounding.grounding_chunks:
+                    chunks.append({
+                        "chunkText": getattr(chunk, "text", ""),
+                        "chunkRelevanceScore": getattr(chunk, "relevance_score", 0.0)
                     })
 
-                logger.info(f"Totale chunks aggregati: {len(all_chunks)}")
-
-            except Exception as e:
-                logger.error(f"Errore FileSearch-store-query: {e}")
-                all_chunks = []
-            
-            logger.info(f"Totale chunks aggregati: {len(all_chunks)}, top score: {all_chunks[0].get('chunkRelevanceScore', 0):.2f} se disponibile")
-            
-            result_data = {
-                'success': True,
-                'relevant_chunks': all_chunks,
-                'query': query_text,
-                'documents_searched': len(active_documents)
-            }
-            
-            # Salva in cache
-            query_cache.set(cache_key, result_data)
-            
-            return jsonify(result_data)
-        
-        else:
-            # Query su un documento specifico
-            search_url = f"{BASE_URL}/{FILE_SEARCH_STORE_NAME}:search?key={GEMINI_API_KEY}"
-
-            search_payload = {
-                "query": query_text,
-                "n": results_count,
-                "documentFilter": {
-                    "document": document_name   # filtert nach genau diesem Dokument
-                }
-            }
-
-            search_response = http_session.post(search_url, json=search_payload)
-            search_response.raise_for_status()
-            search_result = search_response.json()
-
-            return jsonify({
-                'success': True,
-                'relevant_chunks': [
-                    {
-                        "chunkText": r.get("chunkText", ""),
-                        "chunkRelevanceScore": r.get("score", 0),
-                        "source_document": document_name
-                    }
-                    for r in search_result.get("results", [])
-                ],
-                'query': query_text
-            })
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Errore durante query: {str(e)}")
-        error_detail = e.response.json() if hasattr(e, 'response') and e.response.content else str(e)
         return jsonify({
-            'success': False,
-            'error': 'Errore durante la query',
-            'details': error_detail
-        }), 500
+            "success": True,
+            "query": query_text,
+            "answer": answer_text,
+            "relevant_chunks": chunks,
+            "source_documents": FILE_SEARCH_STORE_NAME
+        })
+
     except Exception as e:
-        logger.error(f"Errore imprevisto: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        logger.error(f"Query-Fehler: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/chat/generate', methods=['POST'])
 def generate_response():
@@ -922,7 +829,7 @@ def generate_response():
         
         # System instruction compatto
         system_instruction = """Sei un assistente AI che risponde basandosi SOLO sui documenti forniti. 
-Rispondi in modo chiaro, conciso ed estrai solo le informazioni rilevanti."""
+        Rispondi in modo chiaro, conciso ed estrai solo le informazioni rilevanti."""
         
         # STRATEGIA OTTIMIZZATA: Invia solo le DOMANDE dell'utente (non le risposte)
         # Estrai solo le domande dell'utente dalla cronologia
